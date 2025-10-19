@@ -1,0 +1,52 @@
+# LUMOS-AI Next-Gen Requirements
+# Install: pip install -r requirements.txt
+
+# Core Deep Learning
+torch>=2.0.0
+torchvision>=0.15.0
+transformers>=4.35.0
+accelerate>=0.24.0
+
+# Computer Vision Models
+ultralytics>=8.0.0              # YOLOv8
+timm>=0.9.0                     # For various vision models
+opencv-python>=4.8.0
+pillow>=10.0.0
+
+# Segmentation & Depth
+segment-anything>=1.0           # SAM (Meta)
+# Note: Install SAM with: pip install git+https://github.com/facebookresearch/segment-anything.git
+
+# Advanced OCR
+easyocr>=1.7.0
+# pytesseract>=0.3.10           # Optional fallback
+
+# Fine-tuning & Adapters
+peft>=0.6.0                     # LoRA and adapter training
+safetensors>=0.4.0
+
+# API Integration
+google-generativeai>=0.3.0      # Gemini API
+anthropic>=0.7.0                # Claude API (optional)
+
+# Audio
+pyttsx3>=2.90
+
+# Utilities
+numpy>=1.24.0
+scipy>=1.10.0
+einops>=0.7.0
+
+# Logging & Monitoring
+tqdm>=4.65.0
+colorama>=0.4.6
+
+# Optional GPU Support (uncomment if CUDA available)
+# torch==2.0.0+cu118 -f https://download.pytorch.org/whl/torch_stable.html
+# torchvision==0.15.0+cu118 -f https://download.pytorch.org/whl/torch_stable.html
+
+# System Requirements:
+# - Python 3.9+
+# - 8GB+ RAM (16GB recommended)
+# - GPU: Optional but recommended (4GB+ VRAM)
+# - Tesseract OCR: sudo apt-get install tesseract-ocr (Linux)
