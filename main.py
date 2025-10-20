@@ -1,7 +1,6 @@
 """
 LUMOS-AI Next-Gen - Main Orchestrator
-Integrates all deep learning modules with threading
-Autonomous learning and continuous improvement
+ENHANCED: Live voice interaction, Gemini 2.0 Flash, Camera display
 """
 
 import os
@@ -31,8 +30,9 @@ from modules.feedback_agent import FeedbackAgent
 from modules.reasoning_agent import ReasoningAgent
 from utils.device_manager import get_device_manager
 
-# Audio output
+# Audio output and input
 import pyttsx3
+import speech_recognition as sr
 
 
 # ============================================================================
@@ -44,14 +44,18 @@ CONFIG = {
     'frame_width': 640,
     'frame_height': 480,
     'narration_interval': 4.0,
-    'display_video': False,  # Changed to False as requested
+    'display_video': True,  # ENABLED for camera window
     'api_provider': 'gemini',
+    'gemini_model': 'gemini-2.0-flash-exp',  # UPGRADED to Gemini 2.0 Flash
     'sam_enabled': True,
-    'use_sam': True,  # Added for consistency
-    'use_trocr': True,  # Added missing config
-    'use_easyocr': True,  # Added missing config
-    'enable_feedback': True,  # Added missing config
+    'use_sam': True,
+    'use_trocr': True,
+    'use_easyocr': True,
+    'enable_feedback': True,
     'verbose': True,
+    'voice_interaction': True,  # NEW: Enable voice commands
+    'wake_word': 'lumos',  # NEW: Wake word to activate
+    'auto_narrate': True,  # NEW: Automatic narration mode
 }
 
 
@@ -62,6 +66,94 @@ CONFIG = {
 running = True
 latest_frame = None
 frame_lock = threading.Lock()
+voice_command_queue = Queue(maxsize=5)
+listening_active = False
+
+
+# ============================================================================
+# VOICE INPUT THREAD
+# ============================================================================
+
+def voice_input_thread():
+    """
+    Continuously listens for voice commands.
+    Activates on wake word "lumos" or continuously if auto mode.
+    """
+    global running, listening_active
+    
+    print("\n" + "="*70)
+    print("🎤 VOICE INPUT THREAD STARTING")
+    print("="*70)
+    
+    # Initialize speech recognizer
+    recognizer = sr.Recognizer()
+    microphone = sr.Microphone()
+    
+    # Adjust for ambient noise
+    print("🎧 Calibrating microphone for ambient noise...")
+    with microphone as source:
+        recognizer.adjust_for_ambient_noise(source, duration=2)
+    print("✅ Microphone ready!\n")
+    
+    wake_word = CONFIG['wake_word'].lower()
+    
+    print(f"💡 Say '{CONFIG['wake_word'].upper()}' to interact, or 'stop listening' to pause")
+    print(f"💡 Auto-narration is {'ON' if CONFIG['auto_narrate'] else 'OFF'}\n")
+    
+    while running:
+        try:
+            with microphone as source:
+                print("🎤 Listening..." if listening_active else "🎤 Ready (say wake word)...")
+                
+                # Listen for audio
+                audio = recognizer.listen(source, timeout=5, phrase_time_limit=5)
+                
+                try:
+                    # Recognize speech
+                    text = recognizer.recognize_google(audio).lower()
+                    print(f"👂 Heard: '{text}'")
+                    
+                    # Check for wake word
+                    if wake_word in text and not listening_active:
+                        listening_active = True
+                        print(f"✨ {CONFIG['wake_word'].upper()} activated! Listening for commands...")
+                        continue
+                    
+                    # Check for stop command
+                    if "stop listening" in text or "pause" in text:
+                        listening_active = False
+                        print("⏸️  Voice interaction paused. Say wake word to resume.")
+                        continue
+                    
+                    # Process commands if listening or wake word detected
+                    if listening_active or wake_word in text:
+                        # Remove wake word from command
+                        command = text.replace(wake_word, "").strip()
+                        
+                        if command:
+                            if not voice_command_queue.full():
+                                voice_command_queue.put(command)
+                                print(f"📝 Command queued: '{command}'")
+                        
+                        # Auto-deactivate after command (unless in continuous mode)
+                        if not CONFIG['auto_narrate']:
+                            listening_active = False
+                
+                except sr.UnknownValueError:
+                    # Speech not understood
+                    pass
+                except sr.RequestError as e:
+                    print(f"⚠️ Speech recognition error: {e}")
+                    time.sleep(2)
+        
+        except sr.WaitTimeoutError:
+            # No speech detected within timeout
+            pass
+        except Exception as e:
+            print(f"⚠️ Voice input error: {e}")
+            time.sleep(1)
+    
+    print("👋 Voice input thread stopped")
 
 
 # ============================================================================
@@ -151,17 +243,34 @@ def vision_thread(vision_queue, ocr_queue):
                 import traceback
                 traceback.print_exc()
         
-        # Display video (only if enabled)
+        # Display video with enhanced UI
         if CONFIG['display_video']:
             display_frame = frame.copy()
             
             # Add status overlay
-            status = f"LUMOS-AI | FPS: {int(1/(current_time - last_process_time + 0.001))}"
+            status = f"LUMOS-AI | Objects: {len(vision_output.get('objects', []))} | FPS: {int(1/(current_time - last_process_time + 0.001))}"
             cv2.putText(display_frame, status, (10, 30),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
             
-            cv2.putText(display_frame, "Press 'q' to quit", (10, 60),
+            # Voice status
+            voice_status = "🎤 LISTENING" if listening_active else f"💤 Say '{CONFIG['wake_word'].upper()}'"
+            cv2.putText(display_frame, voice_status, (10, 60),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+            
+            cv2.putText(display_frame, "Press 'q' to quit", (10, 90),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            
+            # Draw detected objects
+            if 'objects' in vision_output:
+                for obj in vision_output['objects'][:5]:  # Show top 5
+                    x1, y1, x2, y2 = obj['box']
+                    label = f"{obj.get('name', 'object')}"
+                    if 'distance_m' in obj:
+                        label += f" {obj['distance_m']}m"
+                    
+                    cv2.rectangle(display_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                    cv2.putText(display_frame, label, (x1, y1-5),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
             
             cv2.imshow('LUMOS-AI Vision', display_frame)
             
@@ -240,6 +349,7 @@ def ocr_thread(ocr_queue, text_queue):
 def reasoning_thread(vision_queue, text_queue):
     """
     Generates natural language narration and speaks to user.
+    Responds to voice commands.
     """
     global running
     
@@ -247,9 +357,10 @@ def reasoning_thread(vision_queue, text_queue):
     print("🧠 REASONING THREAD STARTING")
     print("="*70 + "\n")
     
-    # Initialize reasoning agent
+    # Initialize reasoning agent with Gemini 2.0 Flash
     reasoning_agent = ReasoningAgent(
-        api_provider=CONFIG['api_provider']
+        api_provider=CONFIG['api_provider'],
+        model_name=CONFIG['gemini_model']
     )
     
     # Initialize TTS
@@ -264,52 +375,130 @@ def reasoning_thread(vision_queue, text_queue):
     if CONFIG['enable_feedback']:
         feedback_agent = FeedbackAgent()
     
-    print("🎤 LUMOS-AI is now narrating your surroundings...\n")
+    print("🎤 LUMOS-AI is now active with voice interaction!\n")
+    
+    last_narration_time = time.time()
     
     while running:
         try:
-            # Get vision data
-            if not vision_queue.empty():
-                data = vision_queue.get(timeout=1.0)
+            # Check for voice commands first
+            if not voice_command_queue.empty():
+                command = voice_command_queue.get()
                 
-                vision_data = data['vision_data']
-                frame = data['frame']
-                
-                # Check for text data
-                text_detected = ""
-                if not text_queue.empty():
-                    text_data = text_queue.get()
-                    text_objects = text_data['text_objects']
+                # Process specific commands
+                if "what do you see" in command or "describe" in command:
+                    print(f"🎯 Processing command: '{command}'")
                     
-                    # Combine text from all objects
-                    texts = []
-                    for obj in text_objects:
-                        if 'ocr' in obj and obj['ocr']['text']:
-                            texts.append(obj['ocr']['text'])
+                    # Force immediate vision analysis
+                    if not vision_queue.empty():
+                        data = vision_queue.get()
+                        vision_data = data['vision_data']
+                        
+                        # Generate narration
+                        narration = reasoning_agent.generate_narration(vision_data)
+                        print(f"\n🗣️  LUMOS: {narration}\n")
+                        
+                        try:
+                            tts_engine.say(narration)
+                            tts_engine.runAndWait()
+                        except Exception as e:
+                            print(f"⚠️ TTS error: {e}")
+                
+                elif "read text" in command or "what does it say" in command:
+                    print(f"🎯 Processing command: '{command}'")
                     
-                    text_detected = ' '.join(texts)
+                    # Get latest text detection
+                    if not text_queue.empty():
+                        text_data = text_queue.get()
+                        text_objects = text_data['text_objects']
+                        
+                        texts = []
+                        for obj in text_objects:
+                            if 'ocr' in obj and obj['ocr']['text']:
+                                texts.append(obj['ocr']['text'])
+                        
+                        if texts:
+                            response = f"I can see the following text: {', '.join(texts)}"
+                        else:
+                            response = "I don't see any readable text right now."
+                        
+                        print(f"\n🗣️  LUMOS: {response}\n")
+                        try:
+                            tts_engine.say(response)
+                            tts_engine.runAndWait()
+                        except Exception as e:
+                            print(f"⚠️ TTS error: {e}")
                 
-                # Add text to vision data
-                vision_data['text_detected'] = text_detected
+                elif "how many" in command or "count" in command:
+                    print(f"🎯 Processing command: '{command}'")
+                    
+                    if not vision_queue.empty():
+                        data = vision_queue.get()
+                        vision_data = data['vision_data']
+                        obj_count = len(vision_data.get('objects', []))
+                        
+                        response = f"I can see {obj_count} objects in view."
+                        print(f"\n🗣️  LUMOS: {response}\n")
+                        
+                        try:
+                            tts_engine.say(response)
+                            tts_engine.runAndWait()
+                        except Exception as e:
+                            print(f"⚠️ TTS error: {e}")
                 
-                # Generate narration
-                if CONFIG['verbose']:
-                    print("🤔 Generating narration...")
-                
-                narration = reasoning_agent.generate_narration(vision_data)
-                
-                # Speak narration
-                print(f"\n🗣️  LUMOS: {narration}\n")
-                
-                try:
-                    tts_engine.say(narration)
-                    tts_engine.runAndWait()
-                except Exception as e:
-                    print(f"⚠️ TTS error: {e}")
-                
-                # Optional: Collect feedback (in production, implement UI for this)
-                # feedback_agent.add_feedback(frame, {...}, {...}, 'detection')
-                
+                else:
+                    # General query - use Gemini to respond
+                    response = reasoning_agent.answer_question(command)
+                    print(f"\n🗣️  LUMOS: {response}\n")
+                    
+                    try:
+                        tts_engine.say(response)
+                        tts_engine.runAndWait()
+                    except Exception as e:
+                        print(f"⚠️ TTS error: {e}")
+            
+            # Auto-narration mode
+            current_time = time.time()
+            if CONFIG['auto_narrate'] and current_time - last_narration_time >= CONFIG['narration_interval']:
+                if not vision_queue.empty():
+                    data = vision_queue.get(timeout=1.0)
+                    
+                    vision_data = data['vision_data']
+                    frame = data['frame']
+                    
+                    # Check for text data
+                    text_detected = ""
+                    if not text_queue.empty():
+                        text_data = text_queue.get()
+                        text_objects = text_data['text_objects']
+                        
+                        # Combine text from all objects
+                        texts = []
+                        for obj in text_objects:
+                            if 'ocr' in obj and obj['ocr']['text']:
+                                texts.append(obj['ocr']['text'])
+                        
+                        text_detected = ' '.join(texts)
+                    
+                    # Add text to vision data
+                    vision_data['text_detected'] = text_detected
+                    
+                    # Generate narration
+                    if CONFIG['verbose']:
+                        print("🤔 Generating narration...")
+                    
+                    narration = reasoning_agent.generate_narration(vision_data)
+                    
+                    # Speak narration
+                    print(f"\n🗣️  LUMOS: {narration}\n")
+                    
+                    try:
+                        tts_engine.say(narration)
+                        tts_engine.runAndWait()
+                    except Exception as e:
+                        print(f"⚠️ TTS error: {e}")
+                    
+                    last_narration_time = current_time
             else:
                 time.sleep(0.1)
                 
@@ -343,30 +532,32 @@ def main():
     global running
     
     print("\n" + "="*70)
-    print("✨ LUMOS-AI NEXT-GEN - AUTONOMOUS VISION ASSISTANT ✨")
+    print("✨ LUMOS-AI NEXT-GEN - VOICE-INTERACTIVE VISION ASSISTANT ✨")
     print("="*70)
     print("\n🚀 Starting system...\n")
     
     print("📋 Features:")
     print("   ✅ Multi-model vision fusion (YOLO + DETR + SAM + MiDaS + BLIP-2)")
     print("   ✅ Advanced OCR (TrOCR + EasyOCR)")
-    print("   ✅ AI reasoning (Gemini/Claude API)")
+    print("   ✅ AI reasoning (Gemini 2.0 Flash)")
+    print("   ✅ Voice interaction with wake word")
     print("   ✅ Self-learning with LoRA adapters")
     print("   ✅ Natural language narration")
+    print("   ✅ Live camera display")
     print("   ✅ Depth perception and spatial awareness")
     
     print("\n⚙️  Configuration:")
     print(f"   • Resolution: {CONFIG['frame_width']}x{CONFIG['frame_height']}")
     print(f"   • Narration interval: {CONFIG['narration_interval']}s")
-    print(f"   • API provider: {CONFIG['api_provider']}")
-    print(f"   • SAM segmentation: {CONFIG['sam_enabled']}")
-    print(f"   • TrOCR: {CONFIG['use_trocr']}")
-    print(f"   • EasyOCR: {CONFIG['use_easyocr']}")
+    print(f"   • API: {CONFIG['api_provider']} ({CONFIG['gemini_model']})")
+    print(f"   • Wake word: '{CONFIG['wake_word'].upper()}'")
+    print(f"   • Voice interaction: {CONFIG['voice_interaction']}")
+    print(f"   • Camera display: {CONFIG['display_video']}")
     
     # Initialize device
     device_mgr = get_device_manager(prefer_gpu=True)
     
-    print("\n🛑 Press Ctrl+C to quit\n")
+    print("\n🛑 Press Ctrl+C or 'q' in camera window to quit\n")
     print("="*70 + "\n")
     
     # Create queues
@@ -376,6 +567,14 @@ def main():
     
     # Start threads
     threads = []
+    
+    # Voice input thread
+    if CONFIG['voice_interaction']:
+        voice_t = threading.Thread(
+            target=voice_input_thread,
+            daemon=True
+        )
+        threads.append(voice_t)
     
     vision_t = threading.Thread(
         target=vision_thread,

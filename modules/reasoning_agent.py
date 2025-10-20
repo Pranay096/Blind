@@ -1,25 +1,28 @@
 """
-Reasoning Agent with Gemini/Claude/GPT support
+Reasoning Agent with Gemini 2.0 Flash support
+Enhanced with question-answering capability
 """
 
 import os
 import google.generativeai as genai
 
 class ReasoningAgent:
-    def __init__(self, api_provider='gemini', api_key=None):
+    def __init__(self, api_provider='gemini', api_key=None, model_name='gemini-2.0-flash-exp'):
         """
         Initialize reasoning agent with API support.
         
         Args:
             api_provider: 'gemini', 'claude', or 'gpt'
             api_key: API key (if None, reads from environment or uses hardcoded)
+            model_name: Model name (e.g., 'gemini-2.0-flash-exp', 'gemini-1.5-flash')
         """
         print("🧠 Initializing Reasoning Agent...")
         
         self.api_provider = api_provider.lower()
+        self.model_name = model_name
         
         if self.api_provider == 'gemini':
-            self._init_gemini(api_key)
+            self._init_gemini(api_key, model_name)
         elif self.api_provider == 'claude':
             self._init_claude(api_key)
         else:
@@ -27,9 +30,9 @@ class ReasoningAgent:
         
         print("✅ Reasoning Agent ready!")
     
-    def _init_gemini(self, api_key=None, model_name='gemini-1.5-flash'):
+    def _init_gemini(self, api_key=None, model_name='gemini-2.0-flash-exp'):
         """Initialize Gemini API."""
-        print("  🌟 Configuring Gemini API...")
+        print(f"  🌟 Configuring Gemini API ({model_name})...")
         
         # Priority: 1. Passed key, 2. Environment variable, 3. Hardcoded
         if api_key is None:
@@ -91,6 +94,24 @@ class ReasoningAgent:
         else:
             return "Error: Unsupported API provider"
     
+    def answer_question(self, question, context=None):
+        """
+        Answer a general question using the AI model.
+        
+        Args:
+            question: User's question
+            context: Optional context (e.g., current scene info)
+            
+        Returns:
+            AI-generated answer
+        """
+        if self.api_provider == 'gemini':
+            return self._answer_question_gemini(question, context)
+        elif self.api_provider == 'claude':
+            return self._answer_question_claude(question, context)
+        else:
+            return "I cannot answer that right now."
+    
     def _generate_gemini(self, vision_data):
         """Generate narration using Gemini."""
         try:
@@ -110,6 +131,33 @@ class ReasoningAgent:
         except Exception as e:
             print(f"⚠️ Gemini error: {e}")
             return self._fallback_narration(vision_data)
+    
+    def _answer_question_gemini(self, question, context=None):
+        """Answer question using Gemini."""
+        try:
+            prompt = f"""You are LUMOS, an AI vision assistant helping a user.
+
+User Question: {question}
+"""
+            if context:
+                prompt += f"\nCurrent Scene Context: {context}\n"
+            
+            prompt += "\nProvide a helpful, concise answer (1-2 sentences):"
+            
+            response = self.model.generate_content(
+                prompt,
+                generation_config=genai.types.GenerationConfig(
+                    temperature=0.7,
+                    max_output_tokens=100,
+                )
+            )
+            
+            answer = response.text.strip()
+            return answer if answer else "I'm not sure how to answer that."
+            
+        except Exception as e:
+            print(f"⚠️ Gemini error: {e}")
+            return "I'm having trouble processing that question right now."
     
     def _generate_claude(self, vision_data):
         """Generate narration using Claude."""
@@ -132,14 +180,42 @@ class ReasoningAgent:
             print(f"⚠️ Claude error: {e}")
             return self._fallback_narration(vision_data)
     
+    def _answer_question_claude(self, question, context=None):
+        """Answer question using Claude."""
+        try:
+            prompt = f"""You are LUMOS, an AI vision assistant helping a user.
+
+User Question: {question}
+"""
+            if context:
+                prompt += f"\nCurrent Scene Context: {context}\n"
+            
+            prompt += "\nProvide a helpful, concise answer (1-2 sentences):"
+            
+            response = self.client.messages.create(
+                model="claude-3-5-sonnet-20241022",
+                max_tokens=100,
+                temperature=0.7,
+                messages=[
+                    {"role": "user", "content": prompt}
+                ]
+            )
+            
+            answer = response.content[0].text.strip()
+            return answer if answer else "I'm not sure how to answer that."
+            
+        except Exception as e:
+            print(f"⚠️ Claude error: {e}")
+            return "I'm having trouble processing that question right now."
+    
     def _build_prompt(self, vision_data):
         """Build structured prompt for AI."""
         objects = vision_data.get('objects', [])
         activities = vision_data.get('activities', [])
-        text_detected = vision_data.get('text', '')
-        scene_desc = vision_data.get('scene_description', '')
+        text_detected = vision_data.get('text_detected', '')
+        scene_desc = vision_data.get('caption', '')
         
-        prompt = """You are an AI assistant helping a visually impaired person. 
+        prompt = """You are LUMOS, an AI vision assistant helping a visually impaired person. 
 Generate a brief, natural spoken description (1-2 sentences max) based on:
 
 """
@@ -154,19 +230,19 @@ Generate a brief, natural spoken description (1-2 sentences max) based on:
         
         # Add objects with distances
         if objects:
-            close = [o for o in objects if o.get('distance', 10) < 2.0]
-            far = [o for o in objects if o.get('distance', 10) >= 2.0]
+            close = [o for o in objects if o.get('distance_m', 10) < 2.0]
+            far = [o for o in objects if o.get('distance_m', 10) >= 2.0]
             
             if close:
                 prompt += f"NEARBY (<2m): "
                 for obj in close[:3]:
-                    prompt += f"{obj['label']} at {obj.get('distance', '?')}m, "
+                    prompt += f"{obj.get('name', 'object')} at {obj.get('distance_m', '?')}m, "
                 prompt = prompt.rstrip(', ') + "\n"
             
             if far:
                 prompt += f"OTHER OBJECTS: "
                 for obj in far[:3]:
-                    prompt += f"{obj['label']}, "
+                    prompt += f"{obj.get('name', 'object')}, "
                 prompt = prompt.rstrip(', ') + "\n"
         
         # Add scene
@@ -189,7 +265,7 @@ Generate narration:"""
         """Simple rule-based fallback if API fails."""
         objects = vision_data.get('objects', [])
         activities = vision_data.get('activities', [])
-        text_detected = vision_data.get('text', '')
+        text_detected = vision_data.get('text_detected', '')
         
         parts = []
         
@@ -202,15 +278,15 @@ Generate narration:"""
             parts.append(f"Someone is {activities[0]}")
         
         # Close objects
-        close = [o for o in objects if o.get('distance', 10) < 2.0]
+        close = [o for o in objects if o.get('distance_m', 10) < 2.0]
         if close:
             obj = close[0]
-            parts.append(f"A {obj['label']} is {obj.get('distance', '?')} meters away")
+            parts.append(f"A {obj.get('name', 'object')} is {obj.get('distance_m', '?')} meters away")
         
         # Other objects
         if not close and objects:
             obj = objects[0]
-            parts.append(f"I see a {obj['label']}")
+            parts.append(f"I see a {obj.get('name', 'object')}")
         
         if parts:
             return '. '.join(parts[:2]) + '.'
