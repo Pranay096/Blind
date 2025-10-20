@@ -189,6 +189,13 @@ def vision_thread(vision_queue, ocr_queue):
     last_process_time = time.time()
     frame_count = 0
     
+    # Initialize vision_output with empty data
+    vision_output = {
+        'objects': [],
+        'caption': 'Initializing...',
+        'from_cache': False
+    }
+    
     while running:
         ret, frame = cap.read()
         if not ret:
@@ -247,8 +254,11 @@ def vision_thread(vision_queue, ocr_queue):
         if CONFIG['display_video']:
             display_frame = frame.copy()
             
-            # Add status overlay
-            status = f"LUMOS-AI | Objects: {len(vision_output.get('objects', []))} | FPS: {int(1/(current_time - last_process_time + 0.001))}"
+            # Add status overlay (NOW SAFE - vision_output is always defined)
+            obj_count = len(vision_output.get('objects', []))
+            fps = int(1/(current_time - last_process_time + 0.001))
+            status = f"LUMOS-AI | Objects: {obj_count} | FPS: {fps}"
+            
             cv2.putText(display_frame, status, (10, 30),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
             
