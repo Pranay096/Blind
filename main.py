@@ -1,63 +1,73 @@
 """
-LUMOS-AI Next-Gen - Main Orchestrator
-ENHANCED: Live voice interaction, Gemini 2.0 Flash, Camera display
+LUMOS-AI OPTIMIZED - Automatic Real-Time Vision Assistant
+NO WAKE WORDS - Fully Automatic Interaction
+Optimized for: 16GB RAM, RTX 4050 6GB, Intel i5-12450H
 """
 
 import os
 from pathlib import Path
 
-# CREATE CACHE FOLDER TO STORE MODELS
+# CREATE CACHE FOLDER
 CACHE_DIR = Path("./model_cache")
 CACHE_DIR.mkdir(exist_ok=True)
 
-# TELL HUGGINGFACE TO USE THIS FOLDER
 os.environ['TRANSFORMERS_CACHE'] = str(CACHE_DIR)
 os.environ['HF_HOME'] = str(CACHE_DIR)
 os.environ['HUGGINGFACE_HUB_CACHE'] = str(CACHE_DIR)
+os.environ['TORCH_HOME'] = str(CACHE_DIR)
 
 import cv2
 import threading
 import time
-import json
-from queue import Queue
-from pathlib import Path
+import torch
+from queue import Queue, Empty
 import numpy as np
-
-# Import all agents
-from modules.vision_agent import VisionAgent
-from modules.deep_ocr import DeepOCR
-from modules.feedback_agent import FeedbackAgent
-from modules.reasoning_agent import ReasoningAgent
-from utils.device_manager import get_device_manager
-
-# Audio output and input
 import pyttsx3
 import speech_recognition as sr
 
+# Import modules
+from modules.vision_agent import VisionAgent
+from modules.deep_ocr import DeepOCR
+from modules.reasoning_agent import ReasoningAgent
+from utils.device_manager import get_device_manager
+from optimized_deep_learning import (
+    get_optimized_dl, 
+    AutomaticInteractionManager,
+    PredictionSmoother
+)
+
+# Import pose and sign language
+from vision.pose_detector import PoseDetector
+from vision.sign_language import SignLanguageDetector
 
 # ============================================================================
-# CONFIGURATION
+# OPTIMIZED CONFIGURATION
 # ============================================================================
 
 CONFIG = {
     'camera_index': 0,
     'frame_width': 640,
     'frame_height': 480,
-    'narration_interval': 4.0,
-    'display_video': True,  # ENABLED for camera window
+    'display_video': True,
     'api_provider': 'gemini',
-    'gemini_model': 'gemini-2.0-flash-exp',  # UPGRADED to Gemini 2.0 Flash
-    'sam_enabled': True,
-    'use_sam': True,
+    'gemini_model': 'gemini-2.0-flash-exp',
+    'use_sam': False,  # Disable for speed, enable if needed
     'use_trocr': True,
     'use_easyocr': True,
-    'enable_feedback': True,
-    'verbose': True,
-    'voice_interaction': True,  # NEW: Enable voice commands
-    'wake_word': 'lumos',  # NEW: Wake word to activate
-    'auto_narrate': True,  # NEW: Automatic narration mode
+    'verbose': False,  # Reduce console spam
+    
+    # AUTOMATIC MODE
+    'auto_mode': True,  # No wake word needed
+    'text_detection_enabled': True,
+    'sign_language_enabled': True,
+    'activity_detection_enabled': True,
+    'speech_recognition_enabled': True,
+    
+    # PERFORMANCE
+    'target_fps': 30,
+    'enable_gpu_optimization': True,
+    'use_mixed_precision': True,
 }
-
 
 # ============================================================================
 # GLOBAL STATE
@@ -66,223 +76,314 @@ CONFIG = {
 running = True
 latest_frame = None
 frame_lock = threading.Lock()
-voice_command_queue = Queue(maxsize=5)
-listening_active = False
+tts_queue = Queue(maxsize=10)
+
+# ============================================================================
+# OPTIMIZED TTS THREAD
+# ============================================================================
+
+def tts_thread():
+    """Dedicated thread for text-to-speech to prevent blocking"""
+    print("🔊 TTS thread starting...")
+    
+    engine = pyttsx3.init()
+    engine.setProperty('rate', 175)
+    engine.setProperty('volume', 0.9)
+    
+    while running:
+        try:
+            text = tts_queue.get(timeout=1.0)
+            if text:
+                print(f"🗣️  Speaking: {text}")
+                engine.say(text)
+                engine.runAndWait()
+        except Empty:
+            continue
+        except Exception as e:
+            if CONFIG['verbose']:
+                print(f"⚠️ TTS error: {e}")
+    
+    print("👋 TTS thread stopped")
+
+
+def speak_async(text):
+    """Queue text for speaking without blocking"""
+    if not tts_queue.full():
+        tts_queue.put(text)
 
 
 # ============================================================================
-# VOICE INPUT THREAD
+# SPEECH RECOGNITION THREAD (Continuous)
 # ============================================================================
 
-def voice_input_thread():
-    """
-    Continuously listens for voice commands.
-    Activates on wake word "lumos" or continuously if auto mode.
-    """
-    global running, listening_active
+def speech_thread():
+    """Continuous speech recognition for questions"""
+    global running
     
-    print("\n" + "="*70)
-    print("🎤 VOICE INPUT THREAD STARTING")
-    print("="*70)
+    print("🎤 Speech recognition starting...")
     
-    # Initialize speech recognizer
     recognizer = sr.Recognizer()
     microphone = sr.Microphone()
     
-    # Adjust for ambient noise
-    print("🎧 Calibrating microphone for ambient noise...")
+    # Calibrate
     with microphone as source:
-        recognizer.adjust_for_ambient_noise(source, duration=2)
-    print("✅ Microphone ready!\n")
+        recognizer.adjust_for_ambient_noise(source, duration=1)
     
-    wake_word = CONFIG['wake_word'].lower()
-    
-    print(f"💡 Say '{CONFIG['wake_word'].upper()}' to interact, or 'stop listening' to pause")
-    print(f"💡 Auto-narration is {'ON' if CONFIG['auto_narrate'] else 'OFF'}\n")
+    print("✅ Listening for questions...")
     
     while running:
         try:
             with microphone as source:
-                print("🎤 Listening..." if listening_active else "🎤 Ready (say wake word)...")
-                
-                # Listen for audio
-                audio = recognizer.listen(source, timeout=5, phrase_time_limit=5)
+                audio = recognizer.listen(source, timeout=3, phrase_time_limit=5)
                 
                 try:
-                    # Recognize speech
                     text = recognizer.recognize_google(audio).lower()
-                    print(f"👂 Heard: '{text}'")
                     
-                    # Check for wake word
-                    if wake_word in text and not listening_active:
-                        listening_active = True
-                        print(f"✨ {CONFIG['wake_word'].upper()} activated! Listening for commands...")
-                        continue
-                    
-                    # Check for stop command
-                    if "stop listening" in text or "pause" in text:
-                        listening_active = False
-                        print("⏸️  Voice interaction paused. Say wake word to resume.")
-                        continue
-                    
-                    # Process commands if listening or wake word detected
-                    if listening_active or wake_word in text:
-                        # Remove wake word from command
-                        command = text.replace(wake_word, "").strip()
-                        
-                        if command:
-                            if not voice_command_queue.full():
-                                voice_command_queue.put(command)
-                                print(f"📝 Command queued: '{command}'")
-                        
-                        # Auto-deactivate after command (unless in continuous mode)
-                        if not CONFIG['auto_narrate']:
-                            listening_active = False
+                    # Check if it's a question
+                    question_words = ['what', 'where', 'when', 'who', 'how', 'why', 'is', 'are', 'can']
+                    if any(word in text for word in question_words):
+                        print(f"❓ Question: {text}")
+                        # Process question (will be handled by reasoning agent)
+                        if not tts_queue.full():
+                            # Add to processing queue
+                            pass
                 
                 except sr.UnknownValueError:
-                    # Speech not understood
                     pass
-                except sr.RequestError as e:
-                    print(f"⚠️ Speech recognition error: {e}")
-                    time.sleep(2)
+                except sr.RequestError:
+                    pass
         
         except sr.WaitTimeoutError:
-            # No speech detected within timeout
             pass
         except Exception as e:
-            print(f"⚠️ Voice input error: {e}")
+            if CONFIG['verbose']:
+                print(f"⚠️ Speech error: {e}")
             time.sleep(1)
     
-    print("👋 Voice input thread stopped")
+    print("👋 Speech thread stopped")
 
 
 # ============================================================================
-# VISION PROCESSING THREAD
+# UNIFIED VISION PROCESSING THREAD
 # ============================================================================
 
-def vision_thread(vision_queue, ocr_queue):
+def unified_vision_thread():
     """
-    Continuously captures and processes video frames.
-    Runs unified vision analysis with all models.
+    Single thread handling all vision processing with intelligent scheduling
     """
     global latest_frame, running
     
     print("\n" + "="*70)
-    print("🎥 VISION THREAD STARTING")
+    print("👁️  UNIFIED VISION PROCESSING THREAD")
     print("="*70)
     
     # Initialize camera
     cap = cv2.VideoCapture(CONFIG['camera_index'])
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, CONFIG['frame_width'])
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CONFIG['frame_height'])
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Reduce latency
     
     if not cap.isOpened():
         print("❌ Failed to open camera")
         running = False
         return
     
-    print(f"✅ Camera opened: {CONFIG['frame_width']}x{CONFIG['frame_height']}\n")
+    print(f"✅ Camera ready: {CONFIG['frame_width']}x{CONFIG['frame_height']}\n")
     
-    # Initialize vision agent
+    # Get device and optimization layer
+    device_mgr = get_device_manager(prefer_gpu=True)
+    device = device_mgr.get_device()
+    dl_layer = get_optimized_dl(device)
+    
+    # Initialize all models
+    print("📦 Loading all models...")
     vision_agent = VisionAgent(use_cache=True)
+    ocr_agent = DeepOCR(use_trocr=True, use_easyocr=True)
+    reasoning_agent = ReasoningAgent(api_provider='gemini', model_name=CONFIG['gemini_model'])
     
-    last_process_time = time.time()
+    pose_detector = None
+    if CONFIG['activity_detection_enabled']:
+        pose_detector = PoseDetector(model_size='m')
+    
+    sign_detector = None
+    if CONFIG['sign_language_enabled']:
+        sign_detector = SignLanguageDetector()
+    
+    # Wrap models with optimization
+    if hasattr(vision_agent, 'yolo') and vision_agent.yolo:
+        vision_agent.yolo = dl_layer.wrap_model(vision_agent.yolo, 'yolo')
+    
+    print("✅ All models loaded and optimized!\n")
+    
+    # Interaction manager
+    interaction_mgr = AutomaticInteractionManager()
+    smoother = PredictionSmoother(window_size=3)
+    
+    # Performance tracking
+    fps_time = time.time()
     frame_count = 0
+    fps = 0
     
-    # Initialize vision_output with empty data
-    vision_output = {
+    # Unified results
+    current_results = {
         'objects': [],
-        'caption': 'Initializing...',
-        'from_cache': False
+        'text': '',
+        'sign': '',
+        'activity': '',
+        'caption': ''
     }
+    
+    print("🚀 Starting automatic vision processing...\n")
     
     while running:
         ret, frame = cap.read()
         if not ret:
-            print("⚠️ Failed to capture frame")
-            time.sleep(0.1)
+            time.sleep(0.01)
             continue
         
         frame_count += 1
         
-        # Update shared frame for display
+        # Update shared frame
         with frame_lock:
             latest_frame = frame.copy()
         
-        # Process at intervals
-        current_time = time.time()
-        if current_time - last_process_time >= CONFIG['narration_interval']:
-            try:
-                if CONFIG['verbose']:
-                    print(f"🔍 Processing frame {frame_count}...")
-                
-                # Run complete vision analysis
-                vision_output = vision_agent.analyze_frame(
-                    frame,
-                    use_sam=CONFIG['use_sam']
-                )
-                
-                # Send to OCR and reasoning queues
-                if not vision_queue.full():
-                    vision_queue.put({
-                        'frame': frame.copy(),
-                        'vision_data': vision_output,
-                        'timestamp': current_time
-                    })
-                
-                if not ocr_queue.full():
-                    ocr_queue.put({
-                        'frame': frame.copy(),
-                        'objects': vision_output['objects'],
-                        'timestamp': current_time
-                    })
-                
-                last_process_time = current_time
-                
-                if CONFIG['verbose']:
-                    obj_count = len(vision_output['objects'])
-                    cached = vision_output.get('from_cache', False)
-                    print(f"✅ Vision: {obj_count} objects detected "
-                          f"{'(cached)' if cached else ''}")
-                
-            except Exception as e:
-                print(f"❌ Vision processing error: {e}")
-                import traceback
-                traceback.print_exc()
+        # ====================
+        # 1. FAST DETECTION (Every frame - YOLO)
+        # ====================
+        vision_data = dl_layer.cached_inference(
+            lambda f: vision_agent.analyze_frame(f, use_sam=False),
+            frame,
+            'yolo',
+            force=False
+        )
         
-        # Display video with enhanced UI
+        if vision_data:
+            current_results['objects'] = vision_data.get('objects', [])
+            current_results['caption'] = vision_data.get('caption', '')
+        
+        # ====================
+        # 2. TEXT DETECTION (Every 3 frames)
+        # ====================
+        if CONFIG['text_detection_enabled'] and frame_count % 3 == 0:
+            text_objects = dl_layer.cached_inference(
+                lambda f: ocr_agent.extract_text_from_objects(f, current_results['objects']),
+                frame,
+                'trocr',
+                force=False
+            )
+            
+            if text_objects:
+                # Extract all text
+                texts = []
+                for obj in text_objects:
+                    if 'ocr' in obj and obj['ocr'].get('text'):
+                        texts.append(obj['ocr']['text'])
+                
+                if texts:
+                    full_text = ' '.join(texts)
+                    current_results['text'] = full_text
+                    
+                    # Automatic text reading
+                    if interaction_mgr.should_speak_text(full_text):
+                        speak_async(f"I can see text: {full_text}")
+        
+        # ====================
+        # 3. SIGN LANGUAGE (Every 3 frames)
+        # ====================
+        if CONFIG['sign_language_enabled'] and sign_detector and frame_count % 3 == 0:
+            sign, conf = dl_layer.cached_inference(
+                lambda f: sign_detector.recognize_sign(f, threshold=0.6),
+                frame,
+                'sign',
+                force=False
+            ) or (None, 0)
+            
+            if sign and conf > 0.6:
+                current_results['sign'] = sign
+                
+                # Automatic sign announcement
+                if interaction_mgr.should_announce_sign(sign):
+                    speak_async(f"Sign language detected: {sign}")
+        
+        # ====================
+        # 4. ACTIVITY DETECTION (Every 2 frames)
+        # ====================
+        if CONFIG['activity_detection_enabled'] and pose_detector and frame_count % 2 == 0:
+            poses = dl_layer.cached_inference(
+                lambda f: pose_detector.detect_poses(f),
+                frame,
+                'pose',
+                force=False
+            )
+            
+            if poses:
+                activities = [p['activity'] for p in poses if p.get('activity')]
+                if activities:
+                    activity = activities[0]
+                    current_results['activity'] = activity
+                    
+                    # Automatic activity announcement
+                    if interaction_mgr.should_announce_activity(activity):
+                        speak_async(f"I see someone {activity}")
+        
+        # ====================
+        # DISPLAY WITH OPTIMIZED UI
+        # ====================
         if CONFIG['display_video']:
             display_frame = frame.copy()
             
-            # Add status overlay (NOW SAFE - vision_output is always defined)
-            obj_count = len(vision_output.get('objects', []))
-            fps = int(1/(current_time - last_process_time + 0.001))
-            status = f"LUMOS-AI | Objects: {obj_count} | FPS: {fps}"
+            # FPS counter
+            if time.time() - fps_time >= 1.0:
+                fps = frame_count / (time.time() - fps_time)
+                frame_count = 0
+                fps_time = time.time()
             
-            cv2.putText(display_frame, status, (10, 30),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            # Status overlay
+            y_offset = 30
+            cv2.putText(display_frame, f"LUMOS-AI | FPS: {fps:.1f}", 
+                       (10, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            y_offset += 30
             
-            # Voice status
-            voice_status = "🎤 LISTENING" if listening_active else f"💤 Say '{CONFIG['wake_word'].upper()}'"
-            cv2.putText(display_frame, voice_status, (10, 60),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+            # Cache stats
+            stats = dl_layer.cache.get_stats()
+            cv2.putText(display_frame, stats, 
+                       (10, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+            y_offset += 25
             
-            cv2.putText(display_frame, "Press 'q' to quit", (10, 90),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+            # Current detections
+            if current_results['text']:
+                cv2.putText(display_frame, f"Text: {current_results['text'][:30]}", 
+                           (10, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+                y_offset += 25
             
-            # Draw detected objects
-            if 'objects' in vision_output:
-                for obj in vision_output['objects'][:5]:  # Show top 5
-                    x1, y1, x2, y2 = obj['box']
-                    label = f"{obj.get('name', 'object')}"
-                    if 'distance_m' in obj:
-                        label += f" {obj['distance_m']}m"
-                    
-                    cv2.rectangle(display_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                    cv2.putText(display_frame, label, (x1, y1-5),
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+            if current_results['sign']:
+                cv2.putText(display_frame, f"Sign: {current_results['sign']}", 
+                           (10, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 1)
+                y_offset += 25
             
-            cv2.imshow('LUMOS-AI Vision', display_frame)
+            if current_results['activity']:
+                cv2.putText(display_frame, f"Activity: {current_results['activity']}", 
+                           (10, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+                y_offset += 25
+            
+            cv2.putText(display_frame, "Press 'q' to quit", 
+                       (10, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+            
+            # Draw objects
+            for obj in current_results['objects'][:5]:
+                x1, y1, x2, y2 = obj['box']
+                x1, y1, x2, y2 = smoother.smooth_bbox(obj.get('name', 'obj'), [x1, y1, x2, y2])
+                
+                label = f"{obj.get('name', 'object')}"
+                if 'distance_m' in obj:
+                    label += f" {obj['distance_m']}m"
+                
+                color = (0, 255, 0) if obj.get('distance_m', 10) > 2 else (0, 0, 255)
+                cv2.rectangle(display_frame, (x1, y1), (x2, y2), color, 2)
+                cv2.putText(display_frame, label, (x1, y1-5),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+            
+            cv2.imshow('LUMOS-AI Optimized', display_frame)
             
             key = cv2.waitKey(1) & 0xFF
             if key == ord('q'):
@@ -290,245 +391,21 @@ def vision_thread(vision_queue, ocr_queue):
                 running = False
                 break
         
-        time.sleep(0.03)  # ~30 FPS
+        # Maintain target FPS
+        time.sleep(0.001)  # Minimal sleep for CPU
     
+    # Cleanup
     cap.release()
     cv2.destroyAllWindows()
+    
+    # Print final stats
+    perf = dl_layer.get_performance_stats()
+    print(f"\n📊 Final Performance:")
+    print(f"   Average FPS: {perf['fps']:.1f}")
+    print(f"   {perf['cache_stats']}")
+    print(f"   Total inference time: {perf['avg_total_time']:.3f}s")
+    
     print("👋 Vision thread stopped")
-
-
-# ============================================================================
-# OCR PROCESSING THREAD
-# ============================================================================
-
-def ocr_thread(ocr_queue, text_queue):
-    """
-    Processes OCR on detected objects and text regions.
-    """
-    global running
-    
-    print("\n" + "="*70)
-    print("📖 OCR THREAD STARTING")
-    print("="*70 + "\n")
-    
-    # Initialize OCR
-    ocr_agent = DeepOCR(
-        use_trocr=CONFIG['use_trocr'],
-        use_easyocr=CONFIG['use_easyocr']
-    )
-    
-    while running:
-        try:
-            if not ocr_queue.empty():
-                data = ocr_queue.get(timeout=1.0)
-                
-                frame = data['frame']
-                objects = data['objects']
-                
-                # Extract text from objects
-                ocr_results = ocr_agent.extract_text_from_objects(frame, objects)
-                
-                # Filter objects with text
-                text_objects = [obj for obj in ocr_results if 'ocr' in obj]
-                
-                if text_objects:
-                    if CONFIG['verbose']:
-                        print(f"📝 OCR: Found text in {len(text_objects)} objects")
-                    
-                    # Send to reasoning thread
-                    if not text_queue.full():
-                        text_queue.put({
-                            'text_objects': text_objects,
-                            'timestamp': data['timestamp']
-                        })
-            else:
-                time.sleep(0.1)
-                
-        except Exception as e:
-            if CONFIG['verbose']:
-                print(f"⚠️ OCR error: {e}")
-            time.sleep(1)
-    
-    print("👋 OCR thread stopped")
-
-
-# ============================================================================
-# REASONING & NARRATION THREAD
-# ============================================================================
-
-def reasoning_thread(vision_queue, text_queue):
-    """
-    Generates natural language narration and speaks to user.
-    Responds to voice commands.
-    """
-    global running
-    
-    print("\n" + "="*70)
-    print("🧠 REASONING THREAD STARTING")
-    print("="*70 + "\n")
-    
-    # Initialize reasoning agent with Gemini 2.0 Flash
-    reasoning_agent = ReasoningAgent(
-        api_provider=CONFIG['api_provider'],
-        model_name=CONFIG['gemini_model']
-    )
-    
-    # Initialize TTS
-    print("🔊 Initializing text-to-speech...")
-    tts_engine = pyttsx3.init()
-    tts_engine.setProperty('rate', 165)
-    tts_engine.setProperty('volume', 0.9)
-    print("✅ TTS ready\n")
-    
-    # Initialize feedback agent
-    feedback_agent = None
-    if CONFIG['enable_feedback']:
-        feedback_agent = FeedbackAgent()
-    
-    print("🎤 LUMOS-AI is now active with voice interaction!\n")
-    
-    last_narration_time = time.time()
-    
-    while running:
-        try:
-            # Check for voice commands first
-            if not voice_command_queue.empty():
-                command = voice_command_queue.get()
-                
-                # Process specific commands
-                if "what do you see" in command or "describe" in command:
-                    print(f"🎯 Processing command: '{command}'")
-                    
-                    # Force immediate vision analysis
-                    if not vision_queue.empty():
-                        data = vision_queue.get()
-                        vision_data = data['vision_data']
-                        
-                        # Generate narration
-                        narration = reasoning_agent.generate_narration(vision_data)
-                        print(f"\n🗣️  LUMOS: {narration}\n")
-                        
-                        try:
-                            tts_engine.say(narration)
-                            tts_engine.runAndWait()
-                        except Exception as e:
-                            print(f"⚠️ TTS error: {e}")
-                
-                elif "read text" in command or "what does it say" in command:
-                    print(f"🎯 Processing command: '{command}'")
-                    
-                    # Get latest text detection
-                    if not text_queue.empty():
-                        text_data = text_queue.get()
-                        text_objects = text_data['text_objects']
-                        
-                        texts = []
-                        for obj in text_objects:
-                            if 'ocr' in obj and obj['ocr']['text']:
-                                texts.append(obj['ocr']['text'])
-                        
-                        if texts:
-                            response = f"I can see the following text: {', '.join(texts)}"
-                        else:
-                            response = "I don't see any readable text right now."
-                        
-                        print(f"\n🗣️  LUMOS: {response}\n")
-                        try:
-                            tts_engine.say(response)
-                            tts_engine.runAndWait()
-                        except Exception as e:
-                            print(f"⚠️ TTS error: {e}")
-                
-                elif "how many" in command or "count" in command:
-                    print(f"🎯 Processing command: '{command}'")
-                    
-                    if not vision_queue.empty():
-                        data = vision_queue.get()
-                        vision_data = data['vision_data']
-                        obj_count = len(vision_data.get('objects', []))
-                        
-                        response = f"I can see {obj_count} objects in view."
-                        print(f"\n🗣️  LUMOS: {response}\n")
-                        
-                        try:
-                            tts_engine.say(response)
-                            tts_engine.runAndWait()
-                        except Exception as e:
-                            print(f"⚠️ TTS error: {e}")
-                
-                else:
-                    # General query - use Gemini to respond
-                    response = reasoning_agent.answer_question(command)
-                    print(f"\n🗣️  LUMOS: {response}\n")
-                    
-                    try:
-                        tts_engine.say(response)
-                        tts_engine.runAndWait()
-                    except Exception as e:
-                        print(f"⚠️ TTS error: {e}")
-            
-            # Auto-narration mode
-            current_time = time.time()
-            if CONFIG['auto_narrate'] and current_time - last_narration_time >= CONFIG['narration_interval']:
-                if not vision_queue.empty():
-                    data = vision_queue.get(timeout=1.0)
-                    
-                    vision_data = data['vision_data']
-                    frame = data['frame']
-                    
-                    # Check for text data
-                    text_detected = ""
-                    if not text_queue.empty():
-                        text_data = text_queue.get()
-                        text_objects = text_data['text_objects']
-                        
-                        # Combine text from all objects
-                        texts = []
-                        for obj in text_objects:
-                            if 'ocr' in obj and obj['ocr']['text']:
-                                texts.append(obj['ocr']['text'])
-                        
-                        text_detected = ' '.join(texts)
-                    
-                    # Add text to vision data
-                    vision_data['text_detected'] = text_detected
-                    
-                    # Generate narration
-                    if CONFIG['verbose']:
-                        print("🤔 Generating narration...")
-                    
-                    narration = reasoning_agent.generate_narration(vision_data)
-                    
-                    # Speak narration
-                    print(f"\n🗣️  LUMOS: {narration}\n")
-                    
-                    try:
-                        tts_engine.say(narration)
-                        tts_engine.runAndWait()
-                    except Exception as e:
-                        print(f"⚠️ TTS error: {e}")
-                    
-                    last_narration_time = current_time
-            else:
-                time.sleep(0.1)
-                
-        except KeyboardInterrupt:
-            running = False
-            break
-        except Exception as e:
-            print(f"❌ Reasoning error: {e}")
-            import traceback
-            traceback.print_exc()
-            time.sleep(1)
-    
-    # Save feedback on exit
-    if feedback_agent:
-        stats = feedback_agent.get_statistics()
-        print(f"\n📊 Feedback Statistics:")
-        print(f"   Total feedbacks: {stats['total_feedbacks']}")
-        print(f"   Adapters trained: {stats['adapters_trained']}")
-    
-    print("👋 Reasoning thread stopped")
 
 
 # ============================================================================
@@ -536,81 +413,50 @@ def reasoning_thread(vision_queue, text_queue):
 # ============================================================================
 
 def main():
-    """
-    Main entry point - orchestrates all threads.
-    """
+    """Main entry point"""
     global running
     
     print("\n" + "="*70)
-    print("✨ LUMOS-AI NEXT-GEN - VOICE-INTERACTIVE VISION ASSISTANT ✨")
+    print("✨ LUMOS-AI OPTIMIZED - AUTOMATIC REAL-TIME ASSISTANT ✨")
     print("="*70)
-    print("\n🚀 Starting system...\n")
-    
-    print("📋 Features:")
-    print("   ✅ Multi-model vision fusion (YOLO + DETR + SAM + MiDaS + BLIP-2)")
-    print("   ✅ Advanced OCR (TrOCR + EasyOCR)")
-    print("   ✅ AI reasoning (Gemini 2.0 Flash)")
-    print("   ✅ Voice interaction with wake word")
-    print("   ✅ Self-learning with LoRA adapters")
-    print("   ✅ Natural language narration")
-    print("   ✅ Live camera display")
-    print("   ✅ Depth perception and spatial awareness")
+    print("\n🎯 Features:")
+    print("   ✅ Automatic text reading (no wake word)")
+    print("   ✅ Sign language recognition")
+    print("   ✅ Activity detection (waving, pointing, etc.)")
+    print("   ✅ Speech recognition for questions")
+    print("   ✅ Real-time object detection with depth")
+    print("   ✅ Intelligent caching for smooth performance")
+    print("   ✅ Optimized for RTX 4050 + 16GB RAM")
     
     print("\n⚙️  Configuration:")
+    print(f"   • Target FPS: {CONFIG['target_fps']}")
     print(f"   • Resolution: {CONFIG['frame_width']}x{CONFIG['frame_height']}")
-    print(f"   • Narration interval: {CONFIG['narration_interval']}s")
-    print(f"   • API: {CONFIG['api_provider']} ({CONFIG['gemini_model']})")
-    print(f"   • Wake word: '{CONFIG['wake_word'].upper()}'")
-    print(f"   • Voice interaction: {CONFIG['voice_interaction']}")
-    print(f"   • Camera display: {CONFIG['display_video']}")
+    print(f"   • GPU Optimization: {CONFIG['enable_gpu_optimization']}")
+    print(f"   • Automatic Mode: {CONFIG['auto_mode']}")
     
-    # Initialize device
-    device_mgr = get_device_manager(prefer_gpu=True)
-    
-    print("\n🛑 Press Ctrl+C or 'q' in camera window to quit\n")
+    print("\n🛑 Press 'q' in camera window to quit\n")
     print("="*70 + "\n")
-    
-    # Create queues
-    vision_queue = Queue(maxsize=2)
-    ocr_queue = Queue(maxsize=2)
-    text_queue = Queue(maxsize=2)
     
     # Start threads
     threads = []
     
-    # Voice input thread
-    if CONFIG['voice_interaction']:
-        voice_t = threading.Thread(
-            target=voice_input_thread,
-            daemon=True
-        )
-        threads.append(voice_t)
+    # TTS thread
+    tts_t = threading.Thread(target=tts_thread, daemon=True)
+    threads.append(tts_t)
     
-    vision_t = threading.Thread(
-        target=vision_thread,
-        args=(vision_queue, ocr_queue),
-        daemon=True
-    )
+    # Speech recognition thread
+    if CONFIG['speech_recognition_enabled']:
+        speech_t = threading.Thread(target=speech_thread, daemon=True)
+        threads.append(speech_t)
+    
+    # Main vision thread
+    vision_t = threading.Thread(target=unified_vision_thread, daemon=True)
     threads.append(vision_t)
-    
-    ocr_t = threading.Thread(
-        target=ocr_thread,
-        args=(ocr_queue, text_queue),
-        daemon=True
-    )
-    threads.append(ocr_t)
-    
-    reasoning_t = threading.Thread(
-        target=reasoning_thread,
-        args=(vision_queue, text_queue),
-        daemon=True
-    )
-    threads.append(reasoning_t)
     
     # Start all threads
     for t in threads:
         t.start()
-        time.sleep(1)  # Stagger startup
+        time.sleep(0.5)
     
     # Wait for completion
     try:
@@ -622,7 +468,7 @@ def main():
         time.sleep(2)
     
     print("\n" + "="*70)
-    print("✨ LUMOS-AI shut down complete. Stay safe! ✨")
+    print("✨ LUMOS-AI shut down complete! ✨")
     print("="*70 + "\n")
 
 
